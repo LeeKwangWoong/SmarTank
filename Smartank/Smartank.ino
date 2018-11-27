@@ -1,64 +1,83 @@
 #include <SoftwareSerial.h>
 #include <OneWire.h>
-#define BTtx 3
+
+//PIN Assignment
+#define PH_SENSOR A0            //pH meter
+#define DIRTY_SENSOR A1       // Dirty sensor
+#define TEMPEATURE_SENSOR 4
+
 #define BTrx 2
-#define SensorPin A0            //pH meter
-#define DirtySensorPin A1       // Dirty sensor
-#define Offset 0.00            //deviation compensate for ph meter
+#define BTtx 3
+
+#define MORTOR_IN_1 7                          // motor in 1
+#define MORTOR_IN_2 6                          // motor in 2
+
 #define LED 13
+
+#define Offset 0.00            //deviation compensate for ph meter
+
 #define samplingInterval 20
-#define printInterval 800
-#define ArrayLenth  40    //times of collection
-int pHArray[ArrayLenth];   //Store the average value of the sensor feedback
-int pHArrayIndex=0;
-const int Temp_SensingPin = 4;
-OneWire ds(Temp_SensingPin);
+#define notifyInterval 800
+
+OneWire ds(TEMPEATURE_SENSOR);
 SoftwareSerial BTSerial(BTrx,BTtx);
-int IN1=7;                          // motor in 1
-int IN2=6;                          // motor in 2
 
 void setup(){
   BTSerial.begin(9600);
   Serial.begin(9600);
-  pinMode(Temp_SensingPin, OUTPUT); //Pin, Only Sensing Read Setup
-  pinMode(IN1,OUTPUT);              // motor input 1
-  pinMode(IN2,OUTPUT);              // motor input 2
+  //TODO: OUTPUT PIN?
+  pinMode(TEMPEATURE_SENSOR, OUTPUT); //Pin, Only Sensing Read Setup
+  pinMode(MORTOR_IN_1,OUTPUT);              // motor input 1
+  pinMode(MORTOR_IN_2,OUTPUT);              // motor input 2
 }
 
 void loop(void)
 {
-  int sensorValue=analogRead(DirtySensorPin);             // dirty sensor's value (A1)
-  float dirtyVoltage=sensorValue*(5.0/1024.0);     // dirty sensor's voltage (A1)
-  static unsigned long samplingTime = millis();
-  static unsigned long printTime = millis();
-  static float pHValue,voltage;
-  float temperature = getTemp();                //ds18b20
+  static float pHValue, dirtyVoltage, temperature;
+  static unsigned long samplingTime = 0;
+  static unsigned long notifyTime = 0;
 
+  unsigned long currentTime = millis();
+
+  if(currentTime  > samplingTime + samplingInterval)
+  {
+     pHValue = getPH();
+     dirtyVoltage= getDirty();     // dirty sensor's voltage (A1)
+     temperature = getTemp();                //ds18b20
+     samplingTime = currentTime;
+  }
+
+  if(currentTime > notifyTime + notifyInterval)   //Every 800 milliseconds, print a numerical, convert the state of the LED indicator
+  {
+    notify(pHValue, dirtyVoltage, temperature);
+    notifyTime = currentTime;
+    delay(1000);
+  }
+
+  //TODO: configuration for boundary value
   if (((temperature >= 28 || pHValue <= 6.0) || dirtyVoltage <= 1.0))    // operating condition for motor
     motorA_Rotation();
+}
 
-  if(millis()-samplingTime > samplingInterval)
-  {
-      pHArray[pHArrayIndex++]=analogRead(SensorPin);
-      if(pHArrayIndex==ArrayLenth)pHArrayIndex=0;
-      voltage = avergearray(pHArray, ArrayLenth)*5.0/1024;
-      pHValue = 3.5*voltage+Offset;
-      samplingTime=millis();
-  }
-  if(millis() - printTime > printInterval)   //Every 800 milliseconds, print a numerical, convert the state of the LED indicator
-  {
+void notify(float pHValue, float dirtyVoltage, float temperature) {
+  Serial.println(pHValue,2);
+  Serial.println(dirtyVoltage,2);
+  Serial.println(temperature,2);
+  digitalWrite(LED,digitalRead(LED)^1);
+  BTSerial.println(pHValue);
+  BTSerial.println(dirtyVoltage);
+  BTSerial.println(temperature);
+}
 
-        Serial.println(pHValue,2);
-        Serial.println(dirtyVoltage,2);
-        Serial.println(temperature,2);
-        digitalWrite(LED,digitalRead(LED)^1);
-        printTime=millis();
-        BTSerial.println(pHValue);
-        BTSerial.println(dirtyVoltage);
-        BTSerial.println(temperature);
-        delay(1000);
-        }
-  }
+float getDirty() {
+  int sensorValue = analogRead(DIRTY_SENSOR);             // dirty sensor's value (A1)
+  return sensorValue*(5.0/1024.0);     // dirty sensor's voltage (A1)
+}
+
+float getPH() {
+  float voltage = getAveragePH() * 5.0 / 1024;
+  return (3.5 * voltage) + Offset;
+}
 
 float getTemp(){
   //returns the temperature from one DS18S20 in DEG Celsius
@@ -101,49 +120,57 @@ float getTemp(){
 
 // DS18B20
 
-double avergearray(int* arr, int number){
+#define ArrayLenth  40    //times of collection
+double getAveragePH(){
+  static int arr[ArrayLenth];   //Store the average value of the sensor feedback
+  static int pHArrayIndex = 0;
+  static bool fullySampled = false;
   int i;
-  int max,min;
   double avg;
-  long amount=0;
-  if(number<=0){
-    Serial.println("Error number for the array to avraging!/n");
-    return 0;
+  long sum = 0;
+  int maxPH, minPH;
+  int numberOfSamples = ArrayLenth;
+  int currentPH = analogRead(PH_SENSOR);
+
+  //TODO: int value?
+  arr[pHArrayIndex++] = currentPH;
+  if (pHArrayIndex == ArrayLenth) {
+    pHArrayIndex = 0;
+    fullySampled = true;
   }
-  if(number<5){   //less than 5, calculated directly statistics
-    for(i=0;i<number;i++){
-      amount+=arr[i];
-    }
-    avg = amount/number;
+
+  if (!fullySampled)
+    numberOfSamples = pHArrayIndex;
+
+  if (numberOfSamples < 5) {   //less than 5, calculated directly statistics
+    for(i = 0; i < numberOfSamples; i++)
+      sum += arr[i];
+    avg = sum/numberOfSamples;
     return avg;
-  }else{
-    if(arr[0]<arr[1]){
-      min = arr[0];max=arr[1];
+  }
+
+  minPH = min(arr[0], arr[1]);
+  maxPH = max(arr[0], arr[1]);
+
+  for (i = 2; i < numberOfSamples; i++) {
+    if (minPH <= arr[i] && arr[i] <= maxPH) {
+      sum += arr[i];
+      continue;
     }
-    else{
-      min=arr[1];max=arr[0];
+    if ( arr[i] < minPH) {
+      sum += minPH;     //arr<minPH
+      minPH = arr[i];
+    } else {
+      sum += maxPH;    //arr>maxPH
+      maxPH = arr[i];
     }
-    for(i=2;i<number;i++){
-      if(arr[i]<min){
-        amount+=min;        //arr<min
-        min=arr[i];
-      }else {
-        if(arr[i]>max){
-          amount+=max;    //arr>max
-          max=arr[i];
-        }else{
-          amount+=arr[i]; //min<=arr<=max
-        }
-      }//if
-    }//for
-    avg = (double)amount/(number-2);
-  }//if
+  }//for
+  avg = (double)sum / (numberOfSamples - 2);
   return avg;
 }
 
 void motorA_Rotation()
 {
-    digitalWrite(IN1,HIGH);
-    digitalWrite(IN2,LOW);
+    digitalWrite(MORTOR_IN_1,HIGH);
+    digitalWrite(MORTOR_IN_2,LOW);
 }
-
