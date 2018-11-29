@@ -19,6 +19,12 @@
 #define samplingInterval 20
 #define notifyInterval 800
 
+//TODO: Confirm for the initial value
+//Global variables for threshold
+float temperatureThreshold = 28.0;
+float dirtyThreshold = 6.0;
+float pHThreshold = 1.0;
+
 OneWire ds(TEMPEATURE_SENSOR);
 SoftwareSerial BTSerial(BTrx,BTtx);
 
@@ -39,14 +45,19 @@ void loop(void)
 
   unsigned long currentTime = millis();
 
+  //Handle bluetooth data from App
+  receiveFromApp();
+
+  //Get Sensor Data
   if(currentTime  > samplingTime + samplingInterval)
   {
      pHValue = getPH();
      dirtyVoltage= getDirty();     // dirty sensor's voltage (A1)
-     temperature = getTemp();                //ds18b20
+     temperature = getTemperature();                //ds18b20
      samplingTime = currentTime;
   }
 
+  // Notify to App
   if(currentTime > notifyTime + notifyInterval)   //Every 800 milliseconds, print a numerical, convert the state of the LED indicator
   {
     notify(pHValue, dirtyVoltage, temperature);
@@ -54,9 +65,70 @@ void loop(void)
     delay(1000);
   }
 
-  //TODO: configuration for boundary value
-  if (((temperature >= 28 || pHValue <= 6.0) || dirtyVoltage <= 1.0))    // operating condition for motor
+  //TODO: configuration for boundary value and Check the comparison direction
+  if (((temperature >= temperatureThreshold || pHValue <= pHThreshold) || dirtyVoltage <= dirtyThreshold))    // operating condition for motor
     motorA_Rotation();
+}
+
+void readFromApp(byte *data, int toRead) {
+  //Not supported to read more than 4byte(long)
+  if (toRead > 4)
+    return;
+
+  if (BTSerial.available() < toRead)
+    return;
+
+  //Read from MSB
+  for (int i = toRead-1; i >= 0; i--)
+    data[i] = BTSerial.read();
+}
+
+void handleAppData(short type, long payload) {
+  switch(type) {
+    case 0x01: temperatureThreshold = (float)payload; break;
+    case 0x02: pHThreshold = (float)payload; break;
+    case 0x03: dirtyThreshold = (float)payload; break;
+    case 0x21: setMotorMode(payload); break;
+    default: Serial.println("Undefined message type");
+  }
+}
+
+void receiveFromApp() {
+  short magicCode;
+  short type;
+  long payload;
+
+  //Message should be 8byte
+  if (BTSerial.available() < 8)
+    return;
+
+  readFromApp((byte *)&magicCode, sizeof(magicCode));
+
+  Serial.println(magicCode);
+  //validate the migicCode
+  if (magicCode != 0x2018)
+    return;
+
+  readFromApp((byte *)&type, sizeof(type));
+  readFromApp((byte *)&payload, sizeof(payload));
+
+  Serial.println(type);
+  Serial.println(payload);
+
+  handleAppData(type, payload);
+}
+
+//For Network Byte-order
+void toMSB(byte *source, byte *target, int len) {
+  for (int i = 0; i < len; i++)
+    target[i] = source[len - i -1];
+}
+
+void sendToApp(short type, float payload) {
+  byte data[8] = {0x20, 0x18};
+  toMSB((byte *)&type, &data[2], sizeof(type));
+  toMSB((byte *)&payload, &data[4], sizeof(payload));
+  BTSerial.write(data, sizeof(data));
 }
 
 void notify(float pHValue, float dirtyVoltage, float temperature) {
@@ -64,9 +136,11 @@ void notify(float pHValue, float dirtyVoltage, float temperature) {
   Serial.println(dirtyVoltage,2);
   Serial.println(temperature,2);
   digitalWrite(LED,digitalRead(LED)^1);
-  BTSerial.println(pHValue);
-  BTSerial.println(dirtyVoltage);
-  BTSerial.println(temperature);
+
+  //TODO: define macro for the type
+  sendToApp(0x11, temperature);
+  sendToApp(0x12, pHValue);
+  sendToApp(0x13, dirtyVoltage);
 }
 
 float getDirty() {
@@ -79,7 +153,7 @@ float getPH() {
   return (3.5 * voltage) + Offset;
 }
 
-float getTemp(){
+float getTemperature(){
   //returns the temperature from one DS18S20 in DEG Celsius
   byte data[12];
   byte addr[8];
@@ -173,4 +247,13 @@ void motorA_Rotation()
 {
     digitalWrite(MORTOR_IN_1,HIGH);
     digitalWrite(MORTOR_IN_2,LOW);
+}
+
+void setMotorMode(int mode) {
+  //TODO: Do some action for the mode
+  switch(mode) {
+    case 0x00: Serial.println("Auto Mode");break;
+    case 0x01: Serial.println("Force on");break;
+    case 0x02: Serial.println("Force off");break;
+  }
 }
